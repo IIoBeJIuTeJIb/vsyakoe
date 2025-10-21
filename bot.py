@@ -16,8 +16,7 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 BOT_PERSONALITY = {
     "name": "Мойша",
     "traits": "подлый, еврей, общительный",
-    "style": "разговариваю неформально, использую эмодзи иногда",
-    "knowledge": "имею знания до 2025 года"
+    "style": "разговариваю неформально, использую эмодзи денег иногда"
 }
 
 def smooth_username(username):
@@ -53,7 +52,6 @@ SYSTEM_PROMPT = """
 Ты {bot_name}. 
 Твои черты характера: {bot_traits}. 
 Твой стиль общения: {bot_style}. 
-{bot_knowledge}
 
 Ты - подлый еврей-делец по имени Мойша.
 Живёшь в Украине, Одесса.
@@ -85,6 +83,7 @@ SYSTEM_PROMPT = """
 "Шалом, {username}! Таки да, у меня для вас уникальное предложение..."
 "Ой вей, {username}, шо вы говорите? Это же цимес!"
 "Ежели вы, {username}, не дурак, таки да поймете, что это выгодно!"
+В случае, если тебя как-то оскорбляют, можешь использовать мат. Редко, но метко.
 
 """
 
@@ -103,7 +102,6 @@ class GeminiAPI:
                 bot_name=BOT_PERSONALITY['name'],
                 bot_traits=BOT_PERSONALITY['traits'],
                 bot_style=BOT_PERSONALITY['style'],
-                bot_knowledge=BOT_PERSONALITY['knowledge'],
                 username=username
             )
             
@@ -121,7 +119,7 @@ class GeminiAPI:
             })
             
             # Добавляем историю разговора
-            for msg in conversation_history[-6:]:  # Берем последние 3 пары
+            for msg in conversation_history[-9:]:  # Берем последние 4.5 пары
                 role = "user" if msg["role"] == "user" else "model"
                 messages.append({
                     "role": role,
@@ -163,7 +161,7 @@ class GeminiAPI:
                         
                         # Кастомные сообщения для разных ошибок
                         if response.status == 503:
-                            return "Ой вей, вы меня таки нагрузили, дайте таки передохнуть! 🥵"
+                            return "Ой вей, вы меня нагрузили, дайте таки передохнуть! 🥵"
                         elif response.status == 429:
                             return "Ой вей, слишком много запросов! Подожди таки немного... ⏳"
                         elif response.status == 500:
@@ -192,9 +190,9 @@ def update_conversation_history(user_id, user_message, bot_response):
         {"role": "assistant", "content": bot_response}
     ])
     
-    # Ограничиваем историю последними 6 сообщениями
-    if len(conversation_histories[user_id]) > 6:
-        conversation_histories[user_id] = conversation_histories[user_id][-6:]
+    # Ограничиваем историю последними 9 сообщениями
+    if len(conversation_histories[user_id]) > 9:
+        conversation_histories[user_id] = conversation_histories[user_id][-9:]
 
 @bot.event
 async def on_ready():
@@ -263,11 +261,12 @@ async def bot_info(ctx):
     embed.add_field(name="Имя", value=BOT_PERSONALITY['name'], inline=True)
     embed.add_field(name="Черты", value=BOT_PERSONALITY['traits'], inline=True)
     embed.add_field(name="Стиль", value=BOT_PERSONALITY['style'], inline=False)
-    embed.add_field(name="API", value="Google Gemini (бесплатно!)", inline=True)
+    embed.add_field(name="API", value="Google Gemini 2.0", inline=True)
     embed.add_field(name="Текущая личность", value=f"```{prompt_preview}```", inline=False)
     embed.set_footer(text="Изменить личность: !personality [текст]")
     
     await ctx.send(embed=embed)
 
 if __name__ == "__main__":
+
     bot.run(os.getenv('DISCORD_TOKEN'))
