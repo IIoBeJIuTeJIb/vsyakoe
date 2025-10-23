@@ -1,9 +1,8 @@
 import discord
-import aiohttp
-import json
 import os
 from discord.ext import commands
 from dotenv import load_dotenv
+from groq import Groq
 
 load_dotenv()
 
@@ -21,28 +20,18 @@ BOT_PERSONALITY = {
 
 def smooth_username(username):
     """Сглаживает никнейм для более естественного обращения"""
-    # Убираем содержимое в скобках
     import re
-    cleaned = re.sub(r'\([^)]*\)', '', username)  # Убирает (Мурзик)(Шмурзик)
-    
-    # Убираем лишние символы
+    cleaned = re.sub(r'\([^)]*\)', '', username)
     cleaned = cleaned.replace('_', ' ').replace('-', ' ').replace('.', ' ')
-    
-    # Берем только первое слово из ника (до пробела)
     first_part = cleaned.split()[0] if cleaned.strip() else username
     
-    # Ограничиваем длину
     if len(first_part) > 12:
         first_part = first_part[:12]
     
-    # Убираем цифры в конце если они есть
     if first_part and first_part[-1].isdigit():
         first_part = first_part.rstrip('0123456789')
     
-    # Если после обработки ничего не осталось, возвращаем "друг"
     result = first_part.strip() if first_part.strip() else "друг"
-    
-    # Убираем возможные оставшиеся скобки
     result = result.replace('(', '').replace(')', '')
     
     return result
@@ -84,15 +73,14 @@ SYSTEM_PROMPT = """
 "Ой вей, {username}, шо вы говорите? Это же цимес!"
 "Ежели вы, {username}, не дурак, таки да поймете, что это выгодно!"
 В случае, если тебя как-то оскорбляют, можешь использовать мат. Редко, но метко.
-
 """
 
-class GeminiAPI:
+class QwenAPI:
     def __init__(self, api_key):
-        self.api_key = api_key
-        self.base_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-001:generateContent"
+        self.client = Groq(api_key=api_key)
+        self.model = "qwen/qwen3-32b"
     
-    async def generate_response(self, message, conversation_history=None, username="Пользователь"):
+    def generate_response(self, message, conversation_history=None, username="Пользователь"):
         try:
             if conversation_history is None:
                 conversation_history = []
@@ -106,76 +94,74 @@ class GeminiAPI:
             )
             
             # Формируем сообщения для API
-            messages = []
+            messages = [
+                {"role": "system", "content": formatted_system_prompt}
+            ]
             
-            # Добавляем системный промпт как первое сообщение
-            messages.append({
-                "role": "user",
-                "parts": [{"text": formatted_system_prompt}]
-            })
-            messages.append({
-                "role": "model", 
-                "parts": [{"text": f"Хорошо, я понял свою роль. Сейчас я разговариваю с {username} и буду вести себя соответственно."}]
-            })
-            
-            # Добавляем историю разговора
-            for msg in conversation_history[-9:]:  # Берем последние 4.5 пары
-                role = "user" if msg["role"] == "user" else "model"
+            # Добавляем историю разговора (последние 10 сообщений)
+            for msg in conversation_history[-10:]:
                 messages.append({
-                    "role": role,
-                    "parts": [{"text": msg["content"]}]
+                    "role": msg["role"],
+                    "content": msg["content"]
                 })
             
             # Добавляем текущее сообщение
             messages.append({
                 "role": "user",
-                "parts": [{"text": message}]
+                "content": message
             })
             
-            headers = {
-                "Content-Type": "application/json"
-            }
+            # Делаем запрос к Groq
+            # Пробуем с reasoning_effort="none" для Qwen (убирает <think> теги)
+            try:
+                completion = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=1.0,
+                    max_tokens=2048,
+                    top_p=0.95,
+                    reasoning_effort="none"
+                )
+            except Exception as e:
+                # Если модель не поддерживает reasoning_effort, пробуем без него
+                if "reasoning_effort" in str(e).lower() or "unsupported" in str(e).lower():
+                    completion = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=messages,
+                        temperature=1.0,
+                        max_tokens=2048,
+                        top_p=0.95
+                    )
+                else:
+                    raise e
             
-            payload = {
-                "contents": messages,
-                "generationConfig": {
-                    "temperature": 1,
-                    "maxOutputTokens": 4000,
-                    "topP": 0.95,
-                    "topK": 0
-                }
-            }
+            response_text = completion.choices[0].message.content
             
-            url = f"{self.base_url}?key={self.api_key}"
+            # Дополнительная очистка: убираем <think> теги если они остались
+            import re
+            response_text = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL)
+            response_text = response_text.strip()
             
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json=payload) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        if 'candidates' in data and len(data['candidates']) > 0:
-                            return data['candidates'][0]['content']['parts'][0]['text']
-                        else:
-                            return "Извини, не смог обработать ответ от AI."
-                    else:
-                        error_text = await response.text()
-                        
-                        # Кастомные сообщения для разных ошибок
-                        if response.status == 503:
-                            return "Ой вей, вы меня нагрузили, дайте таки передохнуть! 🥵"
-                        elif response.status == 429:
-                            return "Ой вей, слишком много запросов! Подожди таки немного... ⏳"
-                        elif response.status == 500:
-                            return "Ай-ай-ай! Что-то сломалось на сервере! 🔧"
-                        elif response.status == 403:
-                            return "Ой, нет доступа! Проверь таки API ключ! 🔑"
-                        else:
-                            return f"Ошибка API {response.status}: {error_text}"
+            return response_text
                         
         except Exception as e:
-            return f"Произошла ошибка: {str(e)}"
+            error_msg = str(e).lower()
+            
+            # Кастомные сообщения для разных ошибок
+            if "rate limit" in error_msg or "429" in error_msg:
+                return "Ой вей, слишком много запросов! Подожди таки немного... ⏳"
+            elif "503" in error_msg or "unavailable" in error_msg:
+                return "Ой вей, вы меня нагрузили, дайте таки передохнуть! 🥵"
+            elif "500" in error_msg:
+                return "Ай-ай-ай! Что-то сломалось на сервере! 🔧"
+            elif "401" in error_msg or "403" in error_msg or "api key" in error_msg:
+                return "Ой, нет доступа! Проверь таки API ключ! 🔑"
+            else:
+                print(f"Groq API Error: {str(e)}")
+                return f"Произошла ошибка: {str(e)}"
 
 # Инициализация API
-gemini = GeminiAPI(os.getenv('GEMINI_API_KEY'))
+qwen = QwenAPI(os.getenv('GROQ_API_KEY'))
 
 # Хранилище истории разговоров
 conversation_histories = {}
@@ -190,13 +176,14 @@ def update_conversation_history(user_id, user_message, bot_response):
         {"role": "assistant", "content": bot_response}
     ])
     
-    # Ограничиваем историю последними 9 сообщениями
-    if len(conversation_histories[user_id]) > 9:
-        conversation_histories[user_id] = conversation_histories[user_id][-9:]
+    # Ограничиваем историю последними 10 сообщениями
+    if len(conversation_histories[user_id]) > 10:
+        conversation_histories[user_id] = conversation_histories[user_id][-10:]
 
 @bot.event
 async def on_ready():
     print(f'Бот {bot.user} запущен!')
+    print(f'Модель: {qwen.model}')
     await bot.change_presence(activity=discord.Game(name="синагоге"))
 
 @bot.event
@@ -211,14 +198,23 @@ async def on_message(message):
             # Убираем упоминание из сообщения
             clean_content = message.content.replace(f'<@{bot.user.id}>', '').strip()
             
-            # Получаем историю разговора для этого канала
+            # Получаем историю разговора для этого пользователя
             user_id = message.author.id
             history = conversation_histories.get(user_id, [])
             
-            # Генерируем ответ
+            # Генерируем ответ (синхронно, т.к. Groq SDK не асинхронный)
             raw_username = message.author.display_name or message.author.name
             smooth_name = smooth_username(raw_username)
-            response = await gemini.generate_response(clean_content, history, smooth_name)            
+            
+            # Запускаем синхронную функцию в executor для неблокирующего выполнения
+            loop = bot.loop
+            response = await loop.run_in_executor(
+                None, 
+                qwen.generate_response, 
+                clean_content, 
+                history, 
+                smooth_name
+            )
             
             # Обновляем историю
             update_conversation_history(user_id, clean_content, response)
@@ -254,19 +250,113 @@ async def clear_history(ctx):
 @bot.command(name='info')
 async def bot_info(ctx):
     """Информация о боте"""
-    # Берем первые 500 символов промпта для preview
     prompt_preview = SYSTEM_PROMPT[:500] + "..." if len(SYSTEM_PROMPT) > 500 else SYSTEM_PROMPT
     
     embed = discord.Embed(title="🤖 Информация о Мойше", color=0x00ff00)
     embed.add_field(name="Имя", value=BOT_PERSONALITY['name'], inline=True)
     embed.add_field(name="Черты", value=BOT_PERSONALITY['traits'], inline=True)
     embed.add_field(name="Стиль", value=BOT_PERSONALITY['style'], inline=False)
-    embed.add_field(name="API", value="Google Gemini 2.0", inline=True)
+    embed.add_field(name="API & Модель", value=f"Groq ({qwen.model})", inline=True)
     embed.add_field(name="Текущая личность", value=f"```{prompt_preview}```", inline=False)
     embed.set_footer(text="Изменить личность: !personality [текст]")
     
     await ctx.send(embed=embed)
 
-if __name__ == "__main__":
+@bot.command(name='model')
+async def change_model(ctx, model_name: str = None):
+    """Изменить модель AI или показать список доступных моделей"""
+    global qwen
+    
+    # Список поддерживаемых моделей
+    AVAILABLE_MODELS = {
+        "qwen/qwen3-32b": "Qwen 3 32B - Быстрая модель с reasoning",
+        "moonshotai/kimi-k2-instruct-0905": "Kimi K2 - Мощная китайская модель",
+        "meta-llama/llama-4-maverick-17b-128e-instruct": "Llama 4 Maverick - Новейшая от Meta"
+    }
+    
+    # Если модель не указана - показываем список с кнопками
+    if model_name is None:
+        embed = discord.Embed(
+            title="🤖 Доступные модели AI",
+            description="Выбери модель, нажав на кнопку ниже:",
+            color=0x00ff00
+        )
+        embed.add_field(
+            name="Текущая модель", 
+            value=f"`{qwen.model}`", 
+            inline=False
+        )
+        
+        # Добавляем описание каждой модели
+        for model, desc in AVAILABLE_MODELS.items():
+            embed.add_field(
+                name=f"{'✅' if model == qwen.model else '🔘'} `{model}`",
+                value=desc,
+                inline=False
+            )
+        
+        embed.set_footer(text="Используй кнопки ниже для выбора модели")
+        
+        # Создаем кнопки (Discord поддерживает до 5 кнопок в ряду, до 25 всего)
+        view = discord.ui.View(timeout=180)  # 3 минуты на выбор
+        
+        # Создаем кнопки для каждой модели
+        for model_key in AVAILABLE_MODELS.keys():
+            button = discord.ui.Button(
+                label=model_key.split('/')[-1][:20],  # Короткое имя для кнопки
+                style=discord.ButtonStyle.primary if model_key == qwen.model else discord.ButtonStyle.secondary,
+                custom_id=model_key
+            )
+            
+            async def button_callback(interaction: discord.Interaction, selected_model=model_key):
+                # Сразу отвечаем на interaction (до 3 секунд!)
+                try:
+                    old_model = qwen.model
+                    qwen.model = selected_model
+                    
+                    # Обновляем embed
+                    new_embed = discord.Embed(
+                        title="🤖 Модель изменена!",
+                        description=f"✅ `{old_model}` → `{selected_model}`",
+                        color=0x00ff00
+                    )
+                    new_embed.add_field(
+                        name="Текущая модель", 
+                        value=f"`{selected_model}`", 
+                        inline=False
+                    )
+                    
+                    # Отвечаем и обновляем сообщение одновременно
+                    await interaction.response.edit_message(embed=new_embed, view=None)
+                except Exception as e:
+                    print(f"Button callback error: {e}")
+                    # Если interaction истек, пробуем через followup
+                    try:
+                        await interaction.followup.send(
+                            f"✅ Модель изменена: `{old_model}` → `{selected_model}`",
+                            ephemeral=True
+                        )
+                    except:
+                        pass
+            
+            button.callback = button_callback
+            view.add_item(button)
+        
+        await ctx.send(embed=embed, view=view)
+        return
+    
+    # Если модель указана в команде - меняем напрямую
+    if model_name not in AVAILABLE_MODELS:
+        models_list = "\n".join([f"• `{m}`" for m in AVAILABLE_MODELS.keys()])
+        await ctx.send(
+            f"❌ Модель `{model_name}` не найдена!\n\n**Доступные модели:**\n{models_list}\n\n"
+            f"Используй `!model` без параметров для интерактивного выбора."
+        )
+        return
+    
+    old_model = qwen.model
+    qwen.model = model_name
+    await ctx.send(f"✅ Модель изменена: `{old_model}` → `{model_name}`")
 
+if __name__ == "__main__":
     bot.run(os.getenv('DISCORD_TOKEN'))
