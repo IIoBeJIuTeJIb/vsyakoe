@@ -118,7 +118,7 @@ class QwenAPI:
                     model=self.model,
                     messages=messages,
                     temperature=1.0,
-                    max_tokens=2048,
+                    max_tokens=4000,
                     top_p=0.95,
                     reasoning_effort="none"
                 )
@@ -360,3 +360,4 @@ async def change_model(ctx, model_name: str = None):
 
 if __name__ == "__main__":
     bot.run(os.getenv('DISCORD_TOKEN'))
+
