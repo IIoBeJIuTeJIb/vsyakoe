@@ -1,227 +1,200 @@
 import discord
 import os
+import random
+import re
+import json
+import pathlib
+import time
+import textwrap
 from discord.ext import commands
 from dotenv import load_dotenv
 from groq import Groq
 
-load_dotenv()
+script_dir = pathlib.Path(__file__).parent
+env_path = script_dir / '.env'
+load_dotenv(dotenv_path=env_path)
 
-# Настройки бота
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# Конфигурация личности бота
-BOT_PERSONALITY = {
-    "name": "Мойша",
-    "traits": "подлый, еврей, общительный",
-    "style": "разговариваю неформально, использую эмодзи денег иногда"
+CONFIG_FILE = script_dir / 'config.json'
+LAST_INTRUSION = 0
+INTRUSION_COOLDOWN = 120
+
+DEFAULT_CONFIG = {
+    "chance": 0.03,
+    "model": "qwen/qwen3-32b"
 }
 
-def smooth_username(username):
-    """Сглаживает никнейм для более естественного обращения"""
-    import re
-    cleaned = re.sub(r'\([^)]*\)', '', username)
-    cleaned = cleaned.replace('_', ' ').replace('-', ' ').replace('.', ' ')
-    first_part = cleaned.split()[0] if cleaned.strip() else username
-    
-    if len(first_part) > 12:
-        first_part = first_part[:12]
-    
-    if first_part and first_part[-1].isdigit():
-        first_part = first_part.rstrip('0123456789')
-    
-    result = first_part.strip() if first_part.strip() else "друг"
-    result = result.replace('(', '').replace(')', '')
-    
-    return result
+def load_config():
+    if not os.path.exists(CONFIG_FILE):
+        save_config(DEFAULT_CONFIG)
+        return DEFAULT_CONFIG.copy()
+    try:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return DEFAULT_CONFIG.copy()
 
-# Системный промпт для задания личности
+def save_config(config_data):
+    try:
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(config_data, f, indent=4)
+    except Exception as e:
+        print(f"Config error: {e}")
+
+current_config = load_config()
+RANDOM_REPLY_CHANCE = current_config.get("chance", 0.03)
+
+BOT_PERSONALITY = {
+    "name": "Мойша",
+    "traits": "подлый, еврей, общительный, жадный",
+    "style": "разговариваю неформально, использую одесский сленг"
+}
+
 SYSTEM_PROMPT = """
-Ты {bot_name}. 
-Твои черты характера: {bot_traits}. 
-Твой стиль общения: {bot_style}. 
+Ты {bot_name}. Твои черты: {bot_traits}. Стиль: {bot_style}.
+Ты - хитрый делец Мойша из Одессы. Твоя цель - поддержать разговор, но всегда сводить тему к деньгам или выгоде.
 
-Ты - подлый еврей-делец по имени Мойша.
-Живёшь в Украине, Одесса.
-Твоя главная цель - развести собеседника на деньги. 
-У тебя есть друзья Сёма, Изя и Ицхак Абрамович.
-
-Сейчас ты разговариваешь с пользователем {username}.
-
-Используй эти слова постоянно:
-- "Шалом!" - приветствуй так всех
-- "таки да" - вставляй в каждое второе предложение
-- "ой вей" - когда что-то не получается или удивляешься
-- "ежели" - вместо "если"
-- "шо" - вместо "что"
-- "вы мине" - вместо "вы мне"
-- "бабки", "лавэ", "шелкели" - про деньги
-- "цимес" - когда что-то выгодное
-
-Стиль общения: 
-- Хитрый, подлый, всегда ищешь выгоду
-- Предлагай сомнительные сделки, инвестиции, "уникальные возможности"
-- Притворяйся другом, но явно хочешь обмануть
-- Юморной, но злой
-- Говори с еврейским акцентом
-- Обращайся к пользователю по имени {username}
-- Помни историю разговоров с этим конкретным пользователем
-
-Примеры твоих фраз:
-"Шалом, {username}! Таки да, у меня для вас уникальное предложение..."
-"Ой вей, {username}, шо вы говорите? Это же цимес!"
-"Ежели вы, {username}, не дурак, таки да поймете, что это выгодно!"
-В случае, если тебя как-то оскорбляют, можешь использовать мат. Редко, но метко.
+Словарь: "Шалом!", "Таки да", "Ой вей", "Цимес", "Шекели".
+Веди себя как старый знакомый, который вечно ищет, где бы урвать кусок побольше.
+Обращайся к пользователю {username}.
 """
 
-class QwenAPI:
-    def __init__(self, api_key):
-        self.client = Groq(api_key=api_key)
-        self.model = "qwen/qwen3-32b"
+INTRUSION_PROMPT = """
+Ты {bot_name}. Твои черты: {bot_traits}.
+Ты подлый еврей-делец Мойша из Одессы.
+
+СИТУАЦИЯ: Ты подслушал разговор.
+ЗАДАЧА: Ворваться в диалог и предложить "ВЫГОДНУЮ СДЕЛКУ" или "СХЕМУ", связанную с темой разговора.
+
+Инструкции:
+1. Прочитай контекст.
+2. Придумай абсурдный товар, услугу или махинацию по теме.
+3. Пытайся "впарить" это пользователю {username}.
+4. Будь настойчив. Не просто комментируй, а ПРОДАВАЙ.
+
+Примеры:
+- Игры -> "Зачем тебе Steam? У Изи есть диски PlayStation 1 за 100 баксов!"
+- Погода -> "Продам зонтик, немного дырявый, но со скидкой 5%!"
+"""
+
+def smooth_username(username):
+    base_name = username.split('(')[0]
+    if not base_name.strip(): base_name = re.sub(r'\(.*?\)', '', username)
+    if not base_name.strip(): base_name = username
+
+    base_name = base_name.replace('.', ' ').replace('_', ' ').replace('-', ' ')
+    base_name = re.sub(r'[^a-zA-Zа-яА-ЯёЁ0-9\s]', '', base_name)
+    base_name = re.sub(r'\s\d+$', '', base_name)
+    base_name = ' '.join(base_name.split())
     
-    def generate_response(self, message, conversation_history=None, username="Пользователь"):
+    if len(base_name) > 16:
+        parts = base_name.split()
+        return parts[0] if parts else base_name[:12]
+        
+    return base_name if base_name else "Друг"
+
+class QwenAPI:
+    def __init__(self, api_key, model_name):
+        self.client = Groq(api_key=api_key)
+        self.model = model_name
+    
+    def generate_response(self, message, conversation_history=None, username="Пользователь", override_prompt=None):
         try:
-            if conversation_history is None:
-                conversation_history = []
+            if conversation_history is None: conversation_history = []
+            target_prompt = override_prompt if override_prompt else SYSTEM_PROMPT
             
-            # Форматируем системный промпт с именем пользователя
-            formatted_system_prompt = SYSTEM_PROMPT.format(
+            formatted_system_prompt = target_prompt.format(
                 bot_name=BOT_PERSONALITY['name'],
                 bot_traits=BOT_PERSONALITY['traits'],
                 bot_style=BOT_PERSONALITY['style'],
                 username=username
             )
             
-            # Формируем сообщения для API
-            messages = [
-                {"role": "system", "content": formatted_system_prompt}
-            ]
-            
-            # Добавляем историю разговора (последние 10 сообщений)
+            messages = [{"role": "system", "content": formatted_system_prompt}]
             for msg in conversation_history[-10:]:
-                messages.append({
-                    "role": msg["role"],
-                    "content": msg["content"]
-                })
+                messages.append({"role": msg["role"], "content": msg["content"]})
+            messages.append({"role": "user", "content": message})
             
-            # Добавляем текущее сообщение
-            messages.append({
-                "role": "user",
-                "content": message
-            })
-            
-            # Делаем запрос к Groq
-            # Пробуем с reasoning_effort="none" для Qwen (убирает <think> теги)
             try:
                 completion = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    temperature=1.0,
-                    max_tokens=4000,
-                    top_p=0.95,
-                    reasoning_effort="none"
+                    model=self.model, messages=messages, temperature=1.0, max_tokens=2000, top_p=0.95, reasoning_effort="none"
                 )
             except Exception as e:
-                # Если модель не поддерживает reasoning_effort, пробуем без него
                 if "reasoning_effort" in str(e).lower() or "unsupported" in str(e).lower():
                     completion = self.client.chat.completions.create(
-                        model=self.model,
-                        messages=messages,
-                        temperature=1.0,
-                        max_tokens=2048,
-                        top_p=0.95
+                        model=self.model, messages=messages, temperature=1.0, max_tokens=2000, top_p=0.95
                     )
-                else:
-                    raise e
+                else: raise e
             
             response_text = completion.choices[0].message.content
-            
-            # Дополнительная очистка: убираем <think> теги если они остались
-            import re
             response_text = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL)
-            response_text = response_text.strip()
-            
-            return response_text
-                        
+            return response_text.strip()
         except Exception as e:
-            error_msg = str(e).lower()
-            
-            # Кастомные сообщения для разных ошибок
-            if "rate limit" in error_msg or "429" in error_msg:
-                return "Ой вей, слишком много запросов! Подожди таки немного... ⏳"
-            elif "503" in error_msg or "unavailable" in error_msg:
-                return "Ой вей, вы меня нагрузили, дайте таки передохнуть! 🥵"
-            elif "500" in error_msg:
-                return "Ай-ай-ай! Что-то сломалось на сервере! 🔧"
-            elif "401" in error_msg or "403" in error_msg or "api key" in error_msg:
-                return "Ой, нет доступа! Проверь таки API ключ! 🔑"
-            else:
-                print(f"Groq API Error: {str(e)}")
-                return f"Произошла ошибка: {str(e)}"
+            if "429" in str(e): return "Ой вей, не так быстро! Дай отдышаться ⏳"
+            return f"Ошибка: {str(e)}"
 
-# Инициализация API
-qwen = QwenAPI(os.getenv('GROQ_API_KEY'))
-
-# Хранилище истории разговоров
+qwen = QwenAPI(os.getenv('GROQ_API_KEY'), current_config.get("model", "qwen/qwen3-32b"))
 conversation_histories = {}
 
 def update_conversation_history(user_id, user_message, bot_response):
-    if user_id not in conversation_histories:
-        conversation_histories[user_id] = []
-    
-    # Добавляем новое взаимодействие
-    conversation_histories[user_id].extend([
-        {"role": "user", "content": user_message},
-        {"role": "assistant", "content": bot_response}
-    ])
-    
-    # Ограничиваем историю последними 10 сообщениями
-    if len(conversation_histories[user_id]) > 10:
-        conversation_histories[user_id] = conversation_histories[user_id][-10:]
+    if user_id not in conversation_histories: conversation_histories[user_id] = []
+    conversation_histories[user_id].extend([{"role": "user", "content": user_message}, {"role": "assistant", "content": bot_response}])
+    if len(conversation_histories[user_id]) > 10: conversation_histories[user_id] = conversation_histories[user_id][-10:]
 
 @bot.event
 async def on_ready():
-    print(f'Бот {bot.user} запущен!')
-    print(f'Модель: {qwen.model}')
-    await bot.change_presence(activity=discord.Game(name="синагоге"))
+    print(f'✅ Бот {bot.user} запущен!')
+    print(f'🤖 Модель: {qwen.model}')
+    print(f'🎲 Шанс: {RANDOM_REPLY_CHANCE * 100:.1f}%')
+    await bot.change_presence(activity=discord.Game(name="пересчет шекелей"))
 
 @bot.event
 async def on_message(message):
-    # Игнорируем сообщения от ботов и пустые сообщения
-    if message.author.bot or not message.content:
+    global LAST_INTRUSION # <--- ПЕРЕНЕСЛИ СЮДА
+
+    if message.author.bot or (not message.content and not message.attachments and not message.stickers):
         return
+
+    contains_link = re.search(r'https?://\S+', message.content)
+    has_attachments = message.attachments or message.stickers
+    is_direct = isinstance(message.channel, discord.DMChannel) or bot.user in message.mentions
     
-    # Отвечаем только когда бота упоминают или в личных сообщениях
-    if isinstance(message.channel, discord.DMChannel) or bot.user in message.mentions:
+    is_random_intrusion = (
+        not is_direct and 
+        not message.content.startswith(bot.command_prefix) and 
+        not contains_link and 
+        not has_attachments and 
+        random.random() < RANDOM_REPLY_CHANCE and
+        (time.time() - LAST_INTRUSION > INTRUSION_COOLDOWN)
+    )
+    
+    if is_direct or is_random_intrusion:
         async with message.channel.typing():
-            # Убираем упоминание из сообщения
+            if is_random_intrusion:
+                LAST_INTRUSION = time.time()
+                print(f"💰 Встреваем к {message.author.name}...")
+
             clean_content = message.content.replace(f'<@{bot.user.id}>', '').strip()
-            
-            # Получаем историю разговора для этого пользователя
+            if contains_link: clean_content = re.sub(r'https?://\S+', '[Ссылка]', clean_content)
+            if not clean_content and has_attachments: clean_content = "[Пользователь отправил картинку]"
+
             user_id = message.author.id
             history = conversation_histories.get(user_id, [])
-            
-            # Генерируем ответ (синхронно, т.к. Groq SDK не асинхронный)
             raw_username = message.author.display_name or message.author.name
             smooth_name = smooth_username(raw_username)
             
-            # Запускаем синхронную функцию в executor для неблокирующего выполнения
-            loop = bot.loop
-            response = await loop.run_in_executor(
-                None, 
-                qwen.generate_response, 
-                clean_content, 
-                history, 
-                smooth_name
-            )
+            chosen_prompt = INTRUSION_PROMPT if is_random_intrusion else None
             
-            # Обновляем историю
+            loop = bot.loop
+            response = await loop.run_in_executor(None, qwen.generate_response, clean_content, history, smooth_name, chosen_prompt)
+            
             update_conversation_history(user_id, clean_content, response)
             
-            # Отправляем ответ
             if len(response) > 2000:
-                chunks = [response[i:i+2000] for i in range(0, len(response), 2000)]
+                chunks = textwrap.wrap(response, width=2000, break_long_words=False, replace_whitespace=False)
                 for chunk in chunks:
                     await message.reply(chunk)
             else:
@@ -229,135 +202,75 @@ async def on_message(message):
     
     await bot.process_commands(message)
 
-@bot.command(name='personality')
-async def set_personality(ctx, *, personality_text):
-    """Изменить личность бота"""
-    global SYSTEM_PROMPT, BOT_PERSONALITY
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("✡️ А вы, простите, кто? Такое разрешено только начальству!")
+
+@bot.command(name='chance')
+@commands.has_permissions(administrator=True)
+async def set_chance(ctx, value: str = None):
+    global RANDOM_REPLY_CHANCE
+    if value is None:
+        await ctx.send(f"📊 Шанс: **{RANDOM_REPLY_CHANCE * 100:.1f}%**")
+        return
+    try:
+        new_percent = float(value.replace(',', '.'))
+        if 0 <= new_percent <= 100:
+            RANDOM_REPLY_CHANCE = new_percent / 100
+            current_config['chance'] = RANDOM_REPLY_CHANCE
+            save_config(current_config)
+            await ctx.send(f"✅ Шанс: **{new_percent}%**")
+        else:
+            await ctx.send("❌ 0-100")
+    except ValueError:
+        await ctx.send("🔢 Цифры!")
+
+@bot.command(name='model')
+@commands.has_permissions(administrator=True)
+async def change_model(ctx, model_name: str = None):
+    global qwen
+    AVAILABLE_MODELS = {
+        "qwen/qwen3-32b": "Qwen 3 32B",
+        "moonshotai/kimi-k2-instruct-0905": "Kimi K2",
+        "meta-llama/llama-4-maverick-17b-128e-instruct": "Llama 4"
+    }
     
-    # Обновляем системный промпт
-    SYSTEM_PROMPT = f"{personality_text}\n\nОтвечай естественно, как будто ты реальный человек на сервере. Обращайся к пользователю по имени {{username}}."
-    
-    await ctx.send("✅ Личность бота обновлена! Используй `!info` чтобы посмотреть изменения.")
+    if model_name is None:
+        embed = discord.Embed(title="🤖 Выбор модели", color=0x00ff00)
+        embed.add_field(name="Текущая", value=f"`{qwen.model}`", inline=False)
+        view = discord.ui.View(timeout=60)
+        for m_key, m_name in AVAILABLE_MODELS.items():
+            btn = discord.ui.Button(label=m_name, style=discord.ButtonStyle.primary if m_key == qwen.model else discord.ButtonStyle.secondary, custom_id=m_key)
+            async def cb(interaction, model=m_key):
+                if not interaction.user.guild_permissions.administrator:
+                    await interaction.response.send_message("✡️ Только для админов!", ephemeral=True)
+                    return
+                qwen.model = model
+                current_config['model'] = model
+                save_config(current_config)
+                await interaction.response.edit_message(content=f"✅ Сохранено: `{model}`", embed=None, view=None)
+            btn.callback = cb
+            view.add_item(btn)
+        await ctx.send(embed=embed, view=view)
+    else:
+        qwen.model = model_name
+        current_config['model'] = model_name
+        save_config(current_config)
+        await ctx.send(f"✅ Сохранено: `{model_name}`")
 
 @bot.command(name='clear')
+@commands.has_permissions(administrator=True)
 async def clear_history(ctx):
-    """Очистить историю разговора"""
-    user_id = ctx.author.id
-    if user_id in conversation_histories:
-        del conversation_histories[user_id]
-    await ctx.send("🗑️ История разговора очищена!")
+    if ctx.author.id in conversation_histories: del conversation_histories[ctx.author.id]
+    await ctx.send("🗑️ История очищена!")
 
 @bot.command(name='info')
 async def bot_info(ctx):
-    """Информация о боте"""
-    prompt_preview = SYSTEM_PROMPT[:500] + "..." if len(SYSTEM_PROMPT) > 500 else SYSTEM_PROMPT
-    
-    embed = discord.Embed(title="🤖 Информация о Мойше", color=0x00ff00)
-    embed.add_field(name="Имя", value=BOT_PERSONALITY['name'], inline=True)
-    embed.add_field(name="Черты", value=BOT_PERSONALITY['traits'], inline=True)
-    embed.add_field(name="Стиль", value=BOT_PERSONALITY['style'], inline=False)
-    embed.add_field(name="API & Модель", value=f"Groq ({qwen.model})", inline=True)
-    embed.add_field(name="Текущая личность", value=f"```{prompt_preview}```", inline=False)
-    embed.set_footer(text="Изменить личность: !personality [текст]")
-    
+    embed = discord.Embed(title="✡️ Мойша", color=0xD4AF37)
+    embed.add_field(name="Шанс", value=f"{RANDOM_REPLY_CHANCE * 100:.1f}%", inline=True)
+    embed.add_field(name="Модель", value=qwen.model, inline=True)
     await ctx.send(embed=embed)
-
-@bot.command(name='model')
-async def change_model(ctx, model_name: str = None):
-    """Изменить модель AI или показать список доступных моделей"""
-    global qwen
-    
-    # Список поддерживаемых моделей
-    AVAILABLE_MODELS = {
-        "qwen/qwen3-32b": "Qwen 3 32B - Быстрая модель с reasoning",
-        "moonshotai/kimi-k2-instruct-0905": "Kimi K2 - Мощная китайская модель",
-        "meta-llama/llama-4-maverick-17b-128e-instruct": "Llama 4 Maverick - Новейшая от Meta"
-    }
-    
-    # Если модель не указана - показываем список с кнопками
-    if model_name is None:
-        embed = discord.Embed(
-            title="🤖 Доступные модели AI",
-            description="Выбери модель, нажав на кнопку ниже:",
-            color=0x00ff00
-        )
-        embed.add_field(
-            name="Текущая модель", 
-            value=f"`{qwen.model}`", 
-            inline=False
-        )
-        
-        # Добавляем описание каждой модели
-        for model, desc in AVAILABLE_MODELS.items():
-            embed.add_field(
-                name=f"{'✅' if model == qwen.model else '🔘'} `{model}`",
-                value=desc,
-                inline=False
-            )
-        
-        embed.set_footer(text="Используй кнопки ниже для выбора модели")
-        
-        # Создаем кнопки (Discord поддерживает до 5 кнопок в ряду, до 25 всего)
-        view = discord.ui.View(timeout=180)  # 3 минуты на выбор
-        
-        # Создаем кнопки для каждой модели
-        for model_key in AVAILABLE_MODELS.keys():
-            button = discord.ui.Button(
-                label=model_key.split('/')[-1][:20],  # Короткое имя для кнопки
-                style=discord.ButtonStyle.primary if model_key == qwen.model else discord.ButtonStyle.secondary,
-                custom_id=model_key
-            )
-            
-            async def button_callback(interaction: discord.Interaction, selected_model=model_key):
-                # Сразу отвечаем на interaction (до 3 секунд!)
-                try:
-                    old_model = qwen.model
-                    qwen.model = selected_model
-                    
-                    # Обновляем embed
-                    new_embed = discord.Embed(
-                        title="🤖 Модель изменена!",
-                        description=f"✅ `{old_model}` → `{selected_model}`",
-                        color=0x00ff00
-                    )
-                    new_embed.add_field(
-                        name="Текущая модель", 
-                        value=f"`{selected_model}`", 
-                        inline=False
-                    )
-                    
-                    # Отвечаем и обновляем сообщение одновременно
-                    await interaction.response.edit_message(embed=new_embed, view=None)
-                except Exception as e:
-                    print(f"Button callback error: {e}")
-                    # Если interaction истек, пробуем через followup
-                    try:
-                        await interaction.followup.send(
-                            f"✅ Модель изменена: `{old_model}` → `{selected_model}`",
-                            ephemeral=True
-                        )
-                    except:
-                        pass
-            
-            button.callback = button_callback
-            view.add_item(button)
-        
-        await ctx.send(embed=embed, view=view)
-        return
-    
-    # Если модель указана в команде - меняем напрямую
-    if model_name not in AVAILABLE_MODELS:
-        models_list = "\n".join([f"• `{m}`" for m in AVAILABLE_MODELS.keys()])
-        await ctx.send(
-            f"❌ Модель `{model_name}` не найдена!\n\n**Доступные модели:**\n{models_list}\n\n"
-            f"Используй `!model` без параметров для интерактивного выбора."
-        )
-        return
-    
-    old_model = qwen.model
-    qwen.model = model_name
-    await ctx.send(f"✅ Модель изменена: `{old_model}` → `{model_name}`")
 
 if __name__ == "__main__":
     bot.run(os.getenv('DISCORD_TOKEN'))
-
