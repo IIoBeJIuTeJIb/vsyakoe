@@ -7,6 +7,7 @@ import pathlib
 import time
 import textwrap
 from discord.ext import commands
+from discord import app_commands
 from dotenv import load_dotenv
 from groq import Groq
 
@@ -22,7 +23,6 @@ CONFIG_FILE = script_dir / 'config.json'
 LAST_INTRUSION = 0
 INTRUSION_COOLDOWN = 120
 
-# В конфиге теперь только шанс
 DEFAULT_CONFIG = {
     "chance": 0.03
 }
@@ -229,6 +229,13 @@ async def on_ready():
     print(f'🧠 Мозг: {qwen.model}')
     print(f'👁️ Глаза: {qwen.vision_model}')
     print(f'🎲 Шанс: {RANDOM_REPLY_CHANCE * 100:.1f}%')
+    
+    try:
+        synced = await bot.tree.sync()
+        print(f"🔁 Синхронизировано команд: {len(synced)}")
+    except Exception as e:
+        print(f"❌ Ошибка синхронизации: {e}")
+        
     await bot.change_presence(activity=discord.Game(name="пересчет шекелей"))
 
 @bot.event
@@ -292,20 +299,18 @@ async def on_message(message):
                     await message.reply(chunk)
             else:
                 await message.reply(response)
-    
-    await bot.process_commands(message)
 
-@bot.event
-async def on_command_error(ctx, error):
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send("✡️ А вы, простите, кто? Такое разрешено только начальству!")
-
-@bot.command(name='chance')
-@commands.has_permissions(administrator=True)
-async def set_chance(ctx, value: str = None):
+@bot.tree.command(name="chance", description="Установить шанс вмешательства в разговор")
+@app_commands.describe(value="Процент (0-100), или оставьте пустым, чтобы узнать текущий")
+async def set_chance(interaction: discord.Interaction, value: str = None):
     global RANDOM_REPLY_CHANCE
+    
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("✡️ А вы, простите, кто? Такое разрешено только начальству!", ephemeral=True)
+        return
+
     if value is None:
-        await ctx.send(f"📊 Шанс: **{RANDOM_REPLY_CHANCE * 100:.1f}%**")
+        await interaction.response.send_message(f"📊 Шанс: **{RANDOM_REPLY_CHANCE * 100:.1f}%**")
         return
     try:
         new_percent = float(value.replace(',', '.'))
@@ -313,25 +318,29 @@ async def set_chance(ctx, value: str = None):
             RANDOM_REPLY_CHANCE = new_percent / 100
             current_config['chance'] = RANDOM_REPLY_CHANCE
             save_config(current_config)
-            await ctx.send(f"✅ Шанс: **{new_percent}%**")
+            await interaction.response.send_message(f"✅ Шанс: **{new_percent}%**")
         else:
-            await ctx.send("❌ 0-100")
+            await interaction.response.send_message("❌ Введите число от 0 до 100!", ephemeral=True)
     except ValueError:
-        await ctx.send("🔢 Цифры!")
+        await interaction.response.send_message("🔢 Это таки не цифры! Введите число.", ephemeral=True)
 
-@bot.command(name='clear')
-@commands.has_permissions(administrator=True)
-async def clear_history(ctx):
-    if ctx.author.id in conversation_histories: del conversation_histories[ctx.author.id]
-    await ctx.send("🗑️ История очищена!")
+@bot.tree.command(name="clear", description="Очистить историю диалога с ботом")
+async def clear_history(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+         await interaction.response.send_message("✡️ А вы, простите, кто? Такое разрешено только начальству!", ephemeral=True)
+         return
 
-@bot.command(name='info')
-async def bot_info(ctx):
+    if interaction.user.id in conversation_histories:
+        del conversation_histories[interaction.user.id]
+    await interaction.response.send_message("🗑️ История очищена! Таки начали с чистого листа.", ephemeral=True)
+
+@bot.tree.command(name="info", description="Информация о боте")
+async def bot_info(interaction: discord.Interaction):
     embed = discord.Embed(title="✡️ Мойша", color=0xD4AF37)
     embed.add_field(name="Шанс", value=f"{RANDOM_REPLY_CHANCE * 100:.1f}%", inline=True)
     embed.add_field(name="Мозг", value=qwen.model, inline=True)
     embed.add_field(name="Глаза", value="Llama 4 Maverick", inline=True)
-    await ctx.send(embed=embed)
+    await interaction.response.send_message(embed=embed)
 
 if __name__ == "__main__":
     bot.run(os.getenv('DISCORD_TOKEN'))
