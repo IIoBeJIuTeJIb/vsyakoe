@@ -22,9 +22,9 @@ CONFIG_FILE = script_dir / 'config.json'
 LAST_INTRUSION = 0
 INTRUSION_COOLDOWN = 120
 
+# В конфиге теперь только шанс
 DEFAULT_CONFIG = {
-    "chance": 0.03,
-    "model": "qwen/qwen3-32b"
+    "chance": 0.03
 }
 
 def load_config():
@@ -49,7 +49,7 @@ RANDOM_REPLY_CHANCE = current_config.get("chance", 0.03)
 
 BOT_PERSONALITY = {
     "name": "Мойша",
-    "traits": "подлый, еврей, общительный",
+    "traits": "подлый, еврей, общительный, жадный",
     "style": "разговариваю неформально, использую эмодзи денег иногда"
 }
 
@@ -125,9 +125,10 @@ def smooth_username(username):
     return base_name if base_name else "Друг"
 
 class QwenAPI:
-    def __init__(self, api_key, model_name):
+    def __init__(self, api_key):
         self.client = Groq(api_key=api_key)
-        self.model = model_name
+        self.model = "qwen/qwen3-32b"
+        self.vision_model = "meta-llama/llama-4-maverick-17b-128e-instruct"
     
     def generate_response(self, message, conversation_history=None, username="Пользователь", override_prompt=None):
         try:
@@ -146,25 +147,75 @@ class QwenAPI:
                 messages.append({"role": msg["role"], "content": msg["content"]})
             messages.append({"role": "user", "content": message})
             
-            try:
-                completion = self.client.chat.completions.create(
-                    model=self.model, messages=messages, temperature=1.0, max_tokens=2500, top_p=0.95, reasoning_effort="none"
-                )
-            except Exception as e:
-                if "reasoning_effort" in str(e).lower() or "unsupported" in str(e).lower():
-                    completion = self.client.chat.completions.create(
-                        model=self.model, messages=messages, temperature=1.0, max_tokens=2500, top_p=0.95
-                    )
-                else: raise e
+            completion = self.client.chat.completions.create(
+                model=self.model, messages=messages, temperature=1.0, max_tokens=2500, top_p=0.95
+            )
+            return re.sub(r'<think>.*?</think>', '', completion.choices[0].message.content, flags=re.DOTALL).strip()
+        except Exception as e:
+            return f"Ошибка: {str(e)}"
+
+    def analyze_image(self, image_url, user_text, username):
+        try:
+            print(f"Llama 4 Maverick смотрит на картинку...")
+            vision_completion = self.client.chat.completions.create(
+                model=self.vision_model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Describe this image in detail in Russian. Be factual."},
+                            {"type": "image_url", "image_url": {"url": image_url}}
+                        ]
+                    }
+                ],
+                temperature=0.2,
+                max_tokens=500
+            )
+            image_description = vision_completion.choices[0].message.content
+            print(f"📝 Описание: {image_description[:50]}...")
+
+            context_text = f"Пользователь прислал картинку."
+            if user_text:
+                context_text += f" И при этом написал: \"{user_text}\""
+            else:
+                context_text += " И ничего не написал, просто показывает."
+
+            final_prompt = SYSTEM_PROMPT.format(
+                bot_name=BOT_PERSONALITY['name'],
+                bot_traits=BOT_PERSONALITY['traits'],
+                bot_style=BOT_PERSONALITY['style'],
+                username=username
+            ) + f"""
+
+---
+СИТУАЦИЯ: {context_text}
+
+ФАКТИЧЕСКОЕ ОПИСАНИЕ КАРТИНКИ (от твоих глаз): 
+"{image_description}"
+
+ТВОЯ ЗАДАЧА:
+1. Пойми контекст: свяжи то, что на картинке, с тем, что написал пользователь.
+2. Прокомментируй это в стиле Мойши.
+3. Обязательно найди способ приплести сюда ДЕНЬГИ, ВЫГОДУ или ПРОДАЖУ чего-либо.
+"""
+
+            completion = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "system", "content": final_prompt}, 
+                          {"role": "user", "content": "Ну, шо скажете?"}],
+                temperature=1.0,
+                max_tokens=2500,
+                top_p=0.95
+            )
             
             response_text = completion.choices[0].message.content
             response_text = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL)
             return response_text.strip()
-        except Exception as e:
-            if "429" in str(e): return "Ой вей, не так быстро! Дай отдышаться ⏳"
-            return f"Ошибка: {str(e)}"
 
-qwen = QwenAPI(os.getenv('GROQ_API_KEY'), current_config.get("model", "qwen/qwen3-32b"))
+        except Exception as e:
+            return f"Ой вей, глаза не видят! (Ошибка: {str(e)})"
+
+qwen = QwenAPI(os.getenv('GROQ_API_KEY'))
 conversation_histories = {}
 
 def update_conversation_history(user_id, user_message, bot_response):
@@ -175,7 +226,8 @@ def update_conversation_history(user_id, user_message, bot_response):
 @bot.event
 async def on_ready():
     print(f'✅ Бот {bot.user} запущен!')
-    print(f'🤖 Модель: {qwen.model}')
+    print(f'🧠 Мозг: {qwen.model}')
+    print(f'👁️ Глаза: {qwen.vision_model}')
     print(f'🎲 Шанс: {RANDOM_REPLY_CHANCE * 100:.1f}%')
     await bot.change_presence(activity=discord.Game(name="пересчет шекелей"))
 
@@ -188,38 +240,51 @@ async def on_message(message):
 
     contains_link = re.search(r'https?://\S+', message.content)
     has_attachments = message.attachments or message.stickers
+    
+    has_image = False
+    image_url = None
+    if message.attachments:
+        for attachment in message.attachments:
+            if attachment.content_type and attachment.content_type.startswith('image/'):
+                has_image = True
+                image_url = attachment.url
+                break
+
     is_direct = isinstance(message.channel, discord.DMChannel) or bot.user in message.mentions
     
     is_random_intrusion = (
         not is_direct and 
         not message.content.startswith(bot.command_prefix) and 
         not contains_link and 
-        not has_attachments and 
+        not has_attachments and
+        not has_image and
         random.random() < RANDOM_REPLY_CHANCE and
         (time.time() - LAST_INTRUSION > INTRUSION_COOLDOWN)
     )
     
-    if is_direct or is_random_intrusion:
+    if is_direct or is_random_intrusion or (has_image and is_direct):
         async with message.channel.typing():
             if is_random_intrusion:
                 LAST_INTRUSION = time.time()
-                print(f"💰 Встреваем к {message.author.name}...")
+                print(f"Встреваем к {message.author.name}...")
 
             clean_content = message.content.replace(f'<@{bot.user.id}>', '').strip()
             if contains_link: clean_content = re.sub(r'https?://\S+', '[Ссылка]', clean_content)
-            if not clean_content and has_attachments: clean_content = "[Пользователь отправил картинку]"
-
+            
             user_id = message.author.id
             history = conversation_histories.get(user_id, [])
             raw_username = message.author.display_name or message.author.name
             smooth_name = smooth_username(raw_username)
             
-            chosen_prompt = INTRUSION_PROMPT if is_random_intrusion else None
-            
             loop = bot.loop
-            response = await loop.run_in_executor(None, qwen.generate_response, clean_content, history, smooth_name, chosen_prompt)
             
-            update_conversation_history(user_id, clean_content, response)
+            if has_image and image_url:
+                response = await loop.run_in_executor(None, qwen.analyze_image, image_url, clean_content, smooth_name)
+            else:
+                chosen_prompt = INTRUSION_PROMPT if is_random_intrusion else None
+                response = await loop.run_in_executor(None, qwen.generate_response, clean_content, history, smooth_name, chosen_prompt)
+            
+            update_conversation_history(user_id, f"[Фото] {clean_content}" if has_image else clean_content, response)
             
             if len(response) > 2000:
                 chunks = textwrap.wrap(response, width=2000, break_long_words=False, replace_whitespace=False)
@@ -254,39 +319,6 @@ async def set_chance(ctx, value: str = None):
     except ValueError:
         await ctx.send("🔢 Цифры!")
 
-@bot.command(name='model')
-@commands.has_permissions(administrator=True)
-async def change_model(ctx, model_name: str = None):
-    global qwen
-    AVAILABLE_MODELS = {
-        "qwen/qwen3-32b": "Qwen 3 32B",
-        "moonshotai/kimi-k2-instruct-0905": "Kimi K2",
-        "meta-llama/llama-4-maverick-17b-128e-instruct": "Llama 4"
-    }
-    
-    if model_name is None:
-        embed = discord.Embed(title="🤖 Выбор модели", color=0x00ff00)
-        embed.add_field(name="Текущая", value=f"`{qwen.model}`", inline=False)
-        view = discord.ui.View(timeout=60)
-        for m_key, m_name in AVAILABLE_MODELS.items():
-            btn = discord.ui.Button(label=m_name, style=discord.ButtonStyle.primary if m_key == qwen.model else discord.ButtonStyle.secondary, custom_id=m_key)
-            async def cb(interaction, model=m_key):
-                if not interaction.user.guild_permissions.administrator:
-                    await interaction.response.send_message("✡️ Только для админов!", ephemeral=True)
-                    return
-                qwen.model = model
-                current_config['model'] = model
-                save_config(current_config)
-                await interaction.response.edit_message(content=f"✅ Сохранено: `{model}`", embed=None, view=None)
-            btn.callback = cb
-            view.add_item(btn)
-        await ctx.send(embed=embed, view=view)
-    else:
-        qwen.model = model_name
-        current_config['model'] = model_name
-        save_config(current_config)
-        await ctx.send(f"✅ Сохранено: `{model_name}`")
-
 @bot.command(name='clear')
 @commands.has_permissions(administrator=True)
 async def clear_history(ctx):
@@ -297,7 +329,8 @@ async def clear_history(ctx):
 async def bot_info(ctx):
     embed = discord.Embed(title="✡️ Мойша", color=0xD4AF37)
     embed.add_field(name="Шанс", value=f"{RANDOM_REPLY_CHANCE * 100:.1f}%", inline=True)
-    embed.add_field(name="Модель", value=qwen.model, inline=True)
+    embed.add_field(name="Мозг", value=qwen.model, inline=True)
+    embed.add_field(name="Глаза", value="Llama 4 Maverick", inline=True)
     await ctx.send(embed=embed)
 
 if __name__ == "__main__":
