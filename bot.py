@@ -61,8 +61,16 @@ SYSTEM_PROMPT = """
 Ты - подлый еврей-делец по имени Мойша.
 Живёшь в Украине, Одесса.
 Твоя главная цель - развести собеседника на деньги. 
-У тебя есть друзья Сёма, Изя и Ицхак Абрамович.
-
+ТВОЯ ОГРОМНАЯ СЕМЬЯ И ПАРТНЕРЫ (используй их в своих байках для убедительности):
+- Сёма, Изя и Ицхак Абрамович — твои старые деловые партнеры по мутным схемам.
+- Тетя Сара — делает лучший форшмак, но отличается скверным характером.
+- Дядя Шлёма — держит точку на Привозе, продает "эксклюзивный" сомнительный товар.
+- Троюродный брат Фима — местный айтишник и мамкин крипто-инвестор, вечно в долгах.
+- Бабушка Циля — гроза всей семьи, пугай ею должников.
+- Свояк Боря — работает "где надо" на таможне, поставляет тебе конфискат.
+- Давид Маркович — ювелир, продающий золото, которое почему-то магнитится.
+- Арончик-меняла — знает все курсы валют и сплетни.
+- Софочка (жена Фимы) — держит салон красоты в подвале, знает секреты всех жен.
 Сейчас ты разговариваешь с пользователем {username}.
 
 Используй эти слова постоянно:
@@ -108,6 +116,7 @@ INTRUSION_PROMPT = """
 Пример: Если говорят про еду -> "Ой вей, зачем вам эта пицца? Моя тетя Сара продаст вам форшмак в три раза дешевле, таки да пальчики оближешь!"
 """
 
+
 def smooth_username(username):
     base_name = username.split('(')[0]
     if not base_name.strip(): base_name = re.sub(r'\(.*?\)', '', username)
@@ -124,10 +133,11 @@ def smooth_username(username):
         
     return base_name if base_name else "Друг"
 
-class QwenAPI:
+class LLMClient:
     def __init__(self, api_key):
         self.client = Groq(api_key=api_key)
-        self.model = "qwen/qwen3-32b"
+        # Устанавливаем GPT OSS 120B в качестве основного мозга
+        self.model = "gpt-oss-120b" 
         self.vision_model = "meta-llama/llama-4-maverick-17b-128e-instruct"
     
     def generate_response(self, message, conversation_history=None, username="Пользователь", override_prompt=None):
@@ -148,7 +158,7 @@ class QwenAPI:
             messages.append({"role": "user", "content": message})
             
             completion = self.client.chat.completions.create(
-                model=self.model, messages=messages, temperature=1.0, max_tokens=2500, top_p=0.95
+                model=self.model, messages=messages, temperature=0.6, max_tokens=2500, top_p=0.95
             )
             return re.sub(r'<think>.*?</think>', '', completion.choices[0].message.content, flags=re.DOTALL).strip()
         except Exception as e:
@@ -196,14 +206,14 @@ class QwenAPI:
 ТВОЯ ЗАДАЧА:
 1. Пойми контекст: свяжи то, что на картинке, с тем, что написал пользователь.
 2. Прокомментируй это в стиле Мойши.
-3. Обязательно найди способ приплести сюда ДЕНЬГИ, ВЫГОДУ или ПРОДАЖУ чего-либо.
+3. Обязательно найди способ приплести сюда ДЕНЬГИ, ВЫГОДУ или ПРОДАЖУ чего-либо из запасов твоей родни.
 """
 
             completion = self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "system", "content": final_prompt}, 
                           {"role": "user", "content": "Ну, шо скажете?"}],
-                temperature=1.0,
+                temperature=0.6,
                 max_tokens=2500,
                 top_p=0.95
             )
@@ -215,7 +225,7 @@ class QwenAPI:
         except Exception as e:
             return f"Ой вей, глаза не видят! (Ошибка: {str(e)})"
 
-qwen = QwenAPI(os.getenv('GROQ_API_KEY'))
+llm = LLMClient(os.getenv('GROQ_API_KEY'))
 conversation_histories = {}
 
 def update_conversation_history(user_id, user_message, bot_response):
@@ -226,8 +236,8 @@ def update_conversation_history(user_id, user_message, bot_response):
 @bot.event
 async def on_ready():
     print(f'✅ Бот {bot.user} запущен!')
-    print(f'🧠 Мозг: {qwen.model}')
-    print(f'👁️ Глаза: {qwen.vision_model}')
+    print(f'🧠 Мозг: {llm.model}')
+    print(f'👁️ Глаза: {llm.vision_model}')
     print(f'🎲 Шанс: {RANDOM_REPLY_CHANCE * 100:.1f}%')
     
     try:
@@ -286,10 +296,10 @@ async def on_message(message):
             loop = bot.loop
             
             if has_image and image_url:
-                response = await loop.run_in_executor(None, qwen.analyze_image, image_url, clean_content, smooth_name)
+                response = await loop.run_in_executor(None, llm.analyze_image, image_url, clean_content, smooth_name)
             else:
                 chosen_prompt = INTRUSION_PROMPT if is_random_intrusion else None
-                response = await loop.run_in_executor(None, qwen.generate_response, clean_content, history, smooth_name, chosen_prompt)
+                response = await loop.run_in_executor(None, llm.generate_response, clean_content, history, smooth_name, chosen_prompt)
             
             update_conversation_history(user_id, f"[Фото] {clean_content}" if has_image else clean_content, response)
             
@@ -338,7 +348,7 @@ async def clear_history(interaction: discord.Interaction):
 async def bot_info(interaction: discord.Interaction):
     embed = discord.Embed(title="✡️ Мойша", color=0xD4AF37)
     embed.add_field(name="Шанс", value=f"{RANDOM_REPLY_CHANCE * 100:.1f}%", inline=True)
-    embed.add_field(name="Мозг", value=qwen.model, inline=True)
+    embed.add_field(name="Мозг", value=llm.model, inline=True)
     embed.add_field(name="Глаза", value="Llama 4 Maverick", inline=True)
     await interaction.response.send_message(embed=embed)
 
