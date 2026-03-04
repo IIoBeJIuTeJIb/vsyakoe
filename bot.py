@@ -139,14 +139,13 @@ class GeminiClient:
                 username=username
             )
             
-            # 1. Формируем историю ПРАВИЛЬНО для нового SDK
+            # Формируем историю для SDK
             chat_history = []
             for msg in conversation_history[-10:]:
                 role = "user" if msg["role"] == "user" else "model"
-                # Вот здесь была ошибка: SDK требует строго словарь {"text": "текст"} внутри списка parts
                 chat_history.append({"role": role, "parts": [{"text": msg["content"]}]})
             
-            # 2. Создаем сессию чата с уже загруженной историей
+            # Создаем сессию чата
             chat = self.client.aio.chats.create(
                 model=self.model_name,
                 config={
@@ -156,7 +155,7 @@ class GeminiClient:
                 history=chat_history
             )
             
-            # 3. Собираем текущее сообщение (SDK сам разберется, как правильно упаковать PIL Image и текст)
+            # Собираем текущее сообщение (картинка + текст)
             current_message = []
             if image:
                 current_message.append(image)
@@ -164,8 +163,8 @@ class GeminiClient:
             text_part = message if message else "Шо скажешь за эту картинку?"
             current_message.append(text_part)
             
-            # 4. Отправляем асинхронный запрос
-            response = await chat.send_message_async(current_message)
+            # ВОТ ЗДЕСЬ ИСПРАВЛЕНИЕ: просто send_message, так как мы уже в .aio клиенте
+            response = await chat.send_message(current_message)
             return response.text.strip()
             
         except Exception as e:
@@ -304,4 +303,5 @@ async def bot_info(interaction: discord.Interaction):
 
 if __name__ == "__main__":
     bot.run(os.getenv('DISCORD_TOKEN'))
+
 
