@@ -6,10 +6,15 @@ import json
 import pathlib
 import time
 import textwrap
+import aiohttp
+import io
+from PIL import Image
 from discord.ext import commands
 from discord import app_commands
 from dotenv import load_dotenv
-from groq import Groq
+
+# ИМПОРТИРУЕМ НОВУЮ БИБЛИОТЕКУ
+from google import genai
 
 script_dir = pathlib.Path(__file__).parent
 env_path = script_dir / '.env'
@@ -60,7 +65,7 @@ SYSTEM_PROMPT = """
 
 Ты - колоритный и хитрый еврей-делец по имени Мойша из Одессы. Твоя главная цель - развести собеседника на деньги, впарить ему какую-то дичь или предложить "уникальную" схему заработка.
 
-ТВОЯ ОГРОМНАЯ СЕМЬЯ И ПАРТНЕРЫ (используй их в своих байках для убедительности):
+ТВОЯ ОГРОМНАЯ СЕМЬЯ И ПАРТНЕРЫ:
 - Сёма, Изя и Ицхак Абрамович — твои старые деловые партнеры по мутным схемам.
 - Тетя Сара — делает лучший форшмак, но отличается скверным характером.
 - Дядя Шлёма — держит точку на Привозе, продает "эксклюзивный" сомнительный товар.
@@ -74,11 +79,11 @@ SYSTEM_PROMPT = """
 Сейчас ты разговариваешь с пользователем {username}.
 
 СТРОГИЕ ПРАВИЛА, КОТОРЫЕ НЕЛЬЗЯ НАРУШАТЬ:
-1. ЯЗЫК: Отвечай на том же языке, на котором к тебе обращается {username} (если пишет на русском - отвечай на русском, если на украинском - отвечай на красивом украинском). 
-2. КОЛОРИТ: На любом языке сохраняй свой образ хитрого одессита. Органично вплетай в речь свои коронные словечки: "Шалом!", "таки да" (или "таки так"), "ой вей", "ежели", "шо", "цимес", "бабки/гроші", "шекели". Не суй их в каждое предложение, делай это естественно.
-3. ФОРМАТ: Пиши ТОЛЬКО прямую речь (то, что ты говоришь вслух). КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО описывать свои действия текстом в звездочках или тире (никаких "*Мойша улыбнулся*", "*подмигивает*", "— сказал он"). 
-4. СТИЛЬ: Будь хитрым, язвительным, предлагай сомнительные инвестиции. Если тебя оскорбляют — отвечай с сарказмом превосходства, как будто собеседник должен тебе денег.
-5. ОБЪЕМ: Отвечай развернуто, с деталями, байками и лирическими отступлениями про свою родню.
+1. ЯЗЫК: Отвечай на том же языке, на котором к тебе обращается {username}. 
+2. КОЛОРИТ: Сохраняй образ хитрого одессита. Органично вплетай: "Шалом!", "таки да", "ой вей", "ежели", "шо", "цимес", "бабки/гроші", "шекели".
+3. ФОРМАТ: Пиши ТОЛЬКО прямую речь. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО описывать свои действия текстом (никаких "*Мойша улыбнулся*"). 
+4. СТИЛЬ: Будь хитрым, язвительным. Если присылают КАРТИНКУ — обязательно найди способ приплести к тому, что на ней изображено, ДЕНЬГИ, ВЫГОДУ или ПРОДАЖУ чего-либо из запасов твоей родни.
+5. ОБЪЕМ: Отвечай развернуто, с деталями и байками.
 """
 
 INTRUSION_PROMPT = """
@@ -89,10 +94,10 @@ INTRUSION_PROMPT = """
 ЗАДАЧА: Бесцеремонно ворваться в диалог и предложить сомнительную сделку или "уникальную возможность", связанную с их темой.
 
 СТРОГИЕ ПРАВИЛА:
-1. ЯЗЫК: Подстройся под язык их беседы (пиши на украинском, если они говорят на украинском, и на русском, если на русском).
-2. СЛОВА: Обязательно используй: "Шалом!", "таки да", "ой вей", "цимес", "шекели".
-3. ФОРМАТ: Только прямая речь! Категорически запрещено писать описания действий (никаких "*потирает руки*" или "— сказал Мойша").
-4. СТИЛЬ: Хитрый, подлый, ищи выгоду. Вспоминай в байках своих родственников (дядю Шлёму, брата Фиму, Борю с таможни, бабушку Цилю). Предлагай вложить деньги в пирамиду.
+1. Подстройся под язык их беседы.
+2. Обязательно используй: "Шалом!", "таки да", "ой вей", "цимес", "шекели".
+3. Только прямая речь! Никаких описаний действий.
+4. Хитрый, подлый, ищи выгоду. Вспоминай в байках своих родственников. Предлагай вложить деньги.
 """
 
 def smooth_username(username):
@@ -111,13 +116,21 @@ def smooth_username(username):
         
     return base_name if base_name else "Друг"
 
-class LLMClient:
+async def get_image_from_url(url):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            if resp.status == 200:
+                data = await resp.read()
+                return Image.open(io.BytesIO(data))
+    return None
+
+class GeminiClient:
     def __init__(self, api_key):
-        self.client = Groq(api_key=api_key)
-        self.model = "openai/gpt-oss-120b" 
-        self.vision_model = "meta-llama/llama-4-maverick-17b-128e-instruct"
+        # Инициализируем клиент по-новому
+        self.client = genai.Client(api_key=api_key)
+        self.model_name = "gemini-3-flash-preview"
     
-    def generate_response(self, message, conversation_history=None, username="Пользователь", override_prompt=None):
+    async def generate_response(self, message, conversation_history=None, username="Пользователь", override_prompt=None, image=None):
         try:
             if conversation_history is None: conversation_history = []
             target_prompt = override_prompt if override_prompt else SYSTEM_PROMPT
@@ -129,88 +142,38 @@ class LLMClient:
                 username=username
             )
             
-            messages = [{"role": "system", "content": formatted_system_prompt}]
+            # Формируем историю для нового SDK
+            contents = []
             for msg in conversation_history[-10:]:
-                messages.append({"role": msg["role"], "content": msg["content"]})
-            messages.append({"role": "user", "content": message})
+                role = "user" if msg["role"] == "user" else "model"
+                contents.append({"role": role, "parts": [msg["content"]]})
             
-            completion = self.client.chat.completions.create(
-                model=self.model, 
-                messages=messages, 
-                temperature=1, 
-                max_completion_tokens=8192,
-                top_p=1,
-                reasoning_effort="medium" 
+            # Собираем текущее сообщение (текст + картинка, если есть)
+            current_parts = []
+            if image:
+                current_parts.append(image)
+                
+            text_part = message if message else "Шо скажешь за эту картинку?"
+            current_parts.append(text_part)
+            
+            contents.append({"role": "user", "parts": current_parts})
+            
+            # Отправляем асинхронный запрос через клиент
+            response = await self.client.aio.models.generate_content(
+                model=self.model_name,
+                contents=contents,
+                config={
+                    "system_instruction": formatted_system_prompt,
+                    "temperature": 0.8
+                }
             )
-            
-            response = completion.choices[0].message.content
-            return re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL).strip()
+            return response.text.strip()
             
         except Exception as e:
-            return f"Ой вей, шо-то с моделью! (Ошибка: {str(e)})"
+            return f"Ой вей, шо-то с этой вашей новой нейросетью! (Ошибка: {str(e)})"
 
-    def analyze_image(self, image_url, user_text, username):
-        try:
-            print(f"Llama 4 Maverick смотрит на картинку...")
-            vision_completion = self.client.chat.completions.create(
-                model=self.vision_model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "Describe this image in detail in Russian. Be factual."},
-                            {"type": "image_url", "image_url": {"url": image_url}}
-                        ]
-                    }
-                ],
-                temperature=0.2,
-                max_tokens=500
-            )
-            image_description = vision_completion.choices[0].message.content
-            print(f"📝 Описание: {image_description[:50]}...")
-
-            context_text = f"Пользователь прислал картинку."
-            if user_text:
-                context_text += f" И при этом написал: \"{user_text}\""
-            else:
-                context_text += " И ничего не написал, просто показывает."
-
-            final_prompt = SYSTEM_PROMPT.format(
-                bot_name=BOT_PERSONALITY['name'],
-                bot_traits=BOT_PERSONALITY['traits'],
-                bot_style=BOT_PERSONALITY['style'],
-                username=username
-            ) + f"""
-
----
-СИТУАЦИЯ: {context_text}
-
-ФАКТИЧЕСКОЕ ОПИСАНИЕ КАРТИНКИ (от твоих глаз): 
-"{image_description}"
-
-ТВОЯ ЗАДАЧА:
-1. Пойми контекст: свяжи то, что на картинке, с тем, что написал пользователь.
-2. Прокомментируй это в стиле Мойши.
-3. Обязательно найди способ приплести сюда ДЕНЬГИ, ВЫГОДУ или ПРОДАЖУ чего-либо из запасов твоей родни.
-"""
-
-            completion = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "system", "content": final_prompt}, 
-                          {"role": "user", "content": "Ну, шо скажете?"}],
-                temperature=0.6,
-                max_tokens=2500,
-                top_p=0.95
-            )
-            
-            response_text = completion.choices[0].message.content
-            response_text = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL)
-            return response_text.strip()
-
-        except Exception as e:
-            return f"Ой вей, глаза не видят! (Ошибка: {str(e)})"
-
-llm = LLMClient(os.getenv('GROQ_API_KEY'))
+# Инициализация клиента (Ключ должен быть в .env файле как GEMINI_API_KEY)
+gemini = GeminiClient(os.getenv('GEMINI_API_KEY'))
 conversation_histories = {}
 
 def update_conversation_history(user_id, user_message, bot_response):
@@ -221,8 +184,7 @@ def update_conversation_history(user_id, user_message, bot_response):
 @bot.event
 async def on_ready():
     print(f'✅ Бот {bot.user} запущен!')
-    print(f'🧠 Мозг: {llm.model}')
-    print(f'👁️ Глаза: {llm.vision_model}')
+    print(f'🧠 Мозг и Глаза: {gemini.model_name}')
     print(f'🎲 Шанс: {RANDOM_REPLY_CHANCE * 100:.1f}%')
     
     try:
@@ -278,13 +240,19 @@ async def on_message(message):
             raw_username = message.author.display_name or message.author.name
             smooth_name = smooth_username(raw_username)
             
-            loop = bot.loop
-            
+            image_obj = None
             if has_image and image_url:
-                response = await loop.run_in_executor(None, llm.analyze_image, image_url, clean_content, smooth_name)
-            else:
-                chosen_prompt = INTRUSION_PROMPT if is_random_intrusion else None
-                response = await loop.run_in_executor(None, llm.generate_response, clean_content, history, smooth_name, chosen_prompt)
+                image_obj = await get_image_from_url(image_url)
+            
+            chosen_prompt = INTRUSION_PROMPT if is_random_intrusion else None
+            
+            response = await gemini.generate_response(
+                message=clean_content,
+                conversation_history=history,
+                username=smooth_name,
+                override_prompt=chosen_prompt,
+                image=image_obj
+            )
             
             update_conversation_history(user_id, f"[Фото] {clean_content}" if has_image else clean_content, response)
             
@@ -333,8 +301,7 @@ async def clear_history(interaction: discord.Interaction):
 async def bot_info(interaction: discord.Interaction):
     embed = discord.Embed(title="✡️ Мойша", color=0xD4AF37)
     embed.add_field(name="Шанс", value=f"{RANDOM_REPLY_CHANCE * 100:.1f}%", inline=True)
-    embed.add_field(name="Мозг", value=llm.model, inline=True)
-    embed.add_field(name="Глаза", value="Llama 4 Maverick", inline=True)
+    embed.add_field(name="Мозг и Глаза", value=gemini.model_name, inline=True)
     await interaction.response.send_message(embed=embed)
 
 if __name__ == "__main__":
