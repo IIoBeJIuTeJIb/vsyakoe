@@ -12,8 +12,6 @@ from PIL import Image
 from discord.ext import commands
 from discord import app_commands
 from dotenv import load_dotenv
-
-# ИМПОРТИРУЕМ НОВУЮ БИБЛИОТЕКУ
 from google import genai
 
 script_dir = pathlib.Path(__file__).parent
@@ -126,7 +124,6 @@ async def get_image_from_url(url):
 
 class GeminiClient:
     def __init__(self, api_key):
-        # Инициализируем клиент по-новому
         self.client = genai.Client(api_key=api_key)
         self.model_name = "gemini-3-flash-preview"
     
@@ -142,37 +139,38 @@ class GeminiClient:
                 username=username
             )
             
-            # Формируем историю для нового SDK
-            contents = []
+            # 1. Формируем историю ПРАВИЛЬНО для нового SDK
+            chat_history = []
             for msg in conversation_history[-10:]:
                 role = "user" if msg["role"] == "user" else "model"
-                contents.append({"role": role, "parts": [msg["content"]]})
+                # Вот здесь была ошибка: SDK требует строго словарь {"text": "текст"} внутри списка parts
+                chat_history.append({"role": role, "parts": [{"text": msg["content"]}]})
             
-            # Собираем текущее сообщение (текст + картинка, если есть)
-            current_parts = []
-            if image:
-                current_parts.append(image)
-                
-            text_part = message if message else "Шо скажешь за эту картинку?"
-            current_parts.append(text_part)
-            
-            contents.append({"role": "user", "parts": current_parts})
-            
-            # Отправляем асинхронный запрос через клиент
-            response = await self.client.aio.models.generate_content(
+            # 2. Создаем сессию чата с уже загруженной историей
+            chat = self.client.aio.chats.create(
                 model=self.model_name,
-                contents=contents,
                 config={
                     "system_instruction": formatted_system_prompt,
                     "temperature": 0.8
-                }
+                },
+                history=chat_history
             )
+            
+            # 3. Собираем текущее сообщение (SDK сам разберется, как правильно упаковать PIL Image и текст)
+            current_message = []
+            if image:
+                current_message.append(image)
+                
+            text_part = message if message else "Шо скажешь за эту картинку?"
+            current_message.append(text_part)
+            
+            # 4. Отправляем асинхронный запрос
+            response = await chat.send_message_async(current_message)
             return response.text.strip()
             
         except Exception as e:
-            return f"Ой вей, шо-то с этой вашей новой нейросетью! (Ошибка: {str(e)})"
+            return f"Ой вей, опять шо-то сломалось в этих ваших интернетах! (Ошибка: {str(e)})"
 
-# Инициализация клиента (Ключ должен быть в .env файле как GEMINI_API_KEY)
 gemini = GeminiClient(os.getenv('GEMINI_API_KEY'))
 conversation_histories = {}
 
@@ -306,3 +304,4 @@ async def bot_info(interaction: discord.Interaction):
 
 if __name__ == "__main__":
     bot.run(os.getenv('DISCORD_TOKEN'))
+
