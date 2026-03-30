@@ -167,7 +167,6 @@ class GeminiClient:
             text_part = message if message else "Шо скажешь за эту картинку?"
             current_message.append(text_part)
             
-            # ВОТ ЗДЕСЬ ИСПРАВЛЕНИЕ: просто send_message, так как мы уже в .aio клиенте
             response = await chat.send_message(current_message)
             return response.text.strip()
             
@@ -237,7 +236,7 @@ async def on_message(message):
             if has_image and image_url:
                 image_obj = await get_image_from_url(image_url)
 
-if is_random_intrusion:
+            if is_random_intrusion:
                 LAST_INTRUSION = time.time()
                 print(f"Встреваем в разговор (триггер от {message.author.name})...")
                 
@@ -245,23 +244,20 @@ if is_random_intrusion:
                 five_mins_ago = discord.utils.utcnow() - datetime.timedelta(minutes=5)
                 transcript_lines = []
                 
-                # Читаем историю с конца (максимум 30 сообщений для защиты от спама)
+                # Читаем историю с конца (максимум 30 сообщений)
                 async for msg in message.channel.history(limit=30):
-                    # Если наткнулись на сообщение, которое было написано больше 5 минут назад - стоп!
                     if msg.created_at < five_mins_ago:
                         break
                         
                     if msg.content:
                         clean_msg = msg.content.replace(f'<@{bot.user.id}>', '').strip()
-                        if clean_msg: # Чтобы не добавлять пустые строки (например, если там только картинка)
+                        if clean_msg:
                             transcript_lines.append(f"[{msg.author.display_name}]: {clean_msg}")
                 
-                # Разворачиваем список, чтобы диалог читался сверху вниз (от старых к новым)
+                # Разворачиваем список
                 transcript_lines.reverse() 
                 
-                # Упаковываем это в одно сообщение для Мойши
                 clean_content = "Вот о чем мы тут общаемся (сообщения за последние 5 минут):\n" + "\n".join(transcript_lines) + "\n\nА теперь ворвись в наш разговор!"
-                
                 history = []
                 chosen_prompt = INTRUSION_PROMPT
             else:
@@ -271,6 +267,7 @@ if is_random_intrusion:
                 history = conversation_histories.get(user_id, [])
                 chosen_prompt = None
 
+            # Генерируем ответ
             response = await gemini.generate_response(
                 message=clean_content,
                 conversation_history=history,
@@ -279,10 +276,11 @@ if is_random_intrusion:
                 image=image_obj
             )
             
-            # Сохраняем в историю только если это был личный диалог, а не случайное вмешательство
+            # Сохраняем историю (только для личных бесед)
             if not is_random_intrusion:
                 update_conversation_history(user_id, f"[Фото] {clean_content}" if has_image else clean_content, response)
             
+            # Отправляем ответ в чат
             if len(response) > 2000:
                 chunks = textwrap.wrap(response, width=2000, break_long_words=False, replace_whitespace=False)
                 for chunk in chunks:
@@ -333,5 +331,3 @@ async def bot_info(interaction: discord.Interaction):
 
 if __name__ == "__main__":
     bot.run(os.getenv('DISCORD_TOKEN'))
-
-
