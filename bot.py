@@ -2,6 +2,7 @@ import discord
 import os
 import random
 import re
+import datetime
 import json
 import pathlib
 import time
@@ -236,22 +237,31 @@ async def on_message(message):
             if has_image and image_url:
                 image_obj = await get_image_from_url(image_url)
 
-            if is_random_intrusion:
+if is_random_intrusion:
                 LAST_INTRUSION = time.time()
                 print(f"Встреваем в разговор (триггер от {message.author.name})...")
                 
-                # Собираем контекст из 8 последних сообщений чата
+                # Вычисляем время "5 минут назад" от текущего момента
+                five_mins_ago = discord.utils.utcnow() - datetime.timedelta(minutes=5)
                 transcript_lines = []
-                async for msg in message.channel.history(limit=8):
+                
+                # Читаем историю с конца (максимум 30 сообщений для защиты от спама)
+                async for msg in message.channel.history(limit=30):
+                    # Если наткнулись на сообщение, которое было написано больше 5 минут назад - стоп!
+                    if msg.created_at < five_mins_ago:
+                        break
+                        
                     if msg.content:
                         clean_msg = msg.content.replace(f'<@{bot.user.id}>', '').strip()
-                        transcript_lines.append(f"[{msg.author.display_name}]: {clean_msg}")
+                        if clean_msg: # Чтобы не добавлять пустые строки (например, если там только картинка)
+                            transcript_lines.append(f"[{msg.author.display_name}]: {clean_msg}")
                 
-                transcript_lines.reverse() # Старые сверху, новые снизу
+                # Разворачиваем список, чтобы диалог читался сверху вниз (от старых к новым)
+                transcript_lines.reverse() 
+                
                 # Упаковываем это в одно сообщение для Мойши
-                clean_content = "Вот о чем мы тут общаемся (последние 8 сообщений):\n" + "\n".join(transcript_lines) + "\n\nА теперь ворвись в наш разговор!"
+                clean_content = "Вот о чем мы тут общаемся (сообщения за последние 5 минут):\n" + "\n".join(transcript_lines) + "\n\nА теперь ворвись в наш разговор!"
                 
-                # Для вмешательства личная история не нужна, нужен только этот контекст
                 history = []
                 chosen_prompt = INTRUSION_PROMPT
             else:
