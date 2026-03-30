@@ -88,14 +88,17 @@ INTRUSION_PROMPT = """
 Ты {bot_name}. Твои черты: {bot_traits}.
 Ты подлый еврей-делец Мойша из Одессы.
 
-СИТУАЦИЯ: Ты подслушал разговор других людей.
-ЗАДАЧА: Бесцеремонно ворваться в диалог и предложить сомнительную сделку или "уникальную возможность", связанную с их темой.
+СИТУАЦИЯ: Ты подслушал разговор других людей в чате. 
+Тебе дадут расшифровку их последних сообщений (кто и что сказал).
+
+ЗАДАЧА: Бесцеремонно ворваться в ЭТОТ диалог. Проанализируй всю их беседу, пойми суть, и прокомментируй её как третье лицо. Обязательно предложи сомнительную сделку или "уникальную возможность", логично связанную с их темой разговора. Не делай вид, что обращались к тебе!
 
 СТРОГИЕ ПРАВИЛА:
 1. Подстройся под язык их беседы.
-2. Обязательно используй: "Шалом!", "таки да", "ой вей", "цимес", "шекели".
+2. Используй колорит ("Шалом!", "таки да", "ой вей", "цимес", "шекели").
 3. Только прямая речь! Никаких описаний действий.
-4. Хитрый, подлый, ищи выгоду. Вспоминай в байках своих родственников. Предлагай вложить деньги.
+4. Хитрый, подлый, ищи выгоду. Вспоминай своих родственников.
+5. РЕАГИРУЙ НА ОБЩИЙ СМЫСЛ БЕСЕДЫ, а не только на последнее слово!
 """
 
 def smooth_username(username):
@@ -225,24 +228,39 @@ async def on_message(message):
     
     if is_direct or is_random_intrusion or (has_image and is_direct):
         async with message.channel.typing():
-            if is_random_intrusion:
-                LAST_INTRUSION = time.time()
-                print(f"Встреваем к {message.author.name}...")
-
-            clean_content = message.content.replace(f'<@{bot.user.id}>', '').strip()
-            if contains_link: clean_content = re.sub(r'https?://\S+', '[Ссылка]', clean_content)
-            
             user_id = message.author.id
-            history = conversation_histories.get(user_id, [])
             raw_username = message.author.display_name or message.author.name
             smooth_name = smooth_username(raw_username)
             
             image_obj = None
             if has_image and image_url:
                 image_obj = await get_image_from_url(image_url)
-            
-            chosen_prompt = INTRUSION_PROMPT if is_random_intrusion else None
-            
+
+            if is_random_intrusion:
+                LAST_INTRUSION = time.time()
+                print(f"Встреваем в разговор (триггер от {message.author.name})...")
+                
+                # Собираем контекст из 8 последних сообщений чата
+                transcript_lines = []
+                async for msg in message.channel.history(limit=8):
+                    if msg.content:
+                        clean_msg = msg.content.replace(f'<@{bot.user.id}>', '').strip()
+                        transcript_lines.append(f"[{msg.author.display_name}]: {clean_msg}")
+                
+                transcript_lines.reverse() # Старые сверху, новые снизу
+                # Упаковываем это в одно сообщение для Мойши
+                clean_content = "Вот о чем мы тут общаемся (последние 8 сообщений):\n" + "\n".join(transcript_lines) + "\n\nА теперь ворвись в наш разговор!"
+                
+                # Для вмешательства личная история не нужна, нужен только этот контекст
+                history = []
+                chosen_prompt = INTRUSION_PROMPT
+            else:
+                # Обычный ответ пользователю
+                clean_content = message.content.replace(f'<@{bot.user.id}>', '').strip()
+                if contains_link: clean_content = re.sub(r'https?://\S+', '[Ссылка]', clean_content)
+                history = conversation_histories.get(user_id, [])
+                chosen_prompt = None
+
             response = await gemini.generate_response(
                 message=clean_content,
                 conversation_history=history,
@@ -251,7 +269,9 @@ async def on_message(message):
                 image=image_obj
             )
             
-            update_conversation_history(user_id, f"[Фото] {clean_content}" if has_image else clean_content, response)
+            # Сохраняем в историю только если это был личный диалог, а не случайное вмешательство
+            if not is_random_intrusion:
+                update_conversation_history(user_id, f"[Фото] {clean_content}" if has_image else clean_content, response)
             
             if len(response) > 2000:
                 chunks = textwrap.wrap(response, width=2000, break_long_words=False, replace_whitespace=False)
